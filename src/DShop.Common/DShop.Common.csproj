@@ -90,4 +90,7 @@
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="5.4.0" />
     <PackageReference Include="VaultSharp" Version="0.11.1002" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\DShop.CrossCutting.MultiTenant\DShop.CrossCutting.MultiTenant.csproj" />
+  </ItemGroup>
 </Project>

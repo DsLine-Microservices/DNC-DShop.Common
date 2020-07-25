@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using DShop.Common.Handlers;
 using DShop.Common.Messages;
 using DShop.Common.Types;
+using DShop.CrossCutting.MultiTenant;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -21,23 +22,27 @@ namespace DShop.Common.RabbitMq
     public class BusSubscriber : IBusSubscriber
     {
         private readonly ILogger _logger;
-        //private readonly IBusClient _busClient;
         private readonly List<IBusClient> _listBusClient;
         private readonly IServiceProvider _serviceProvider;
         private readonly ITracer _tracer;
-        private readonly string _defaultNamespace;
-        private readonly int _retries;
-        private readonly int _retryInterval;
+        private readonly int _retries = 3;
+        private readonly int _retryInterval = 2;
+        private readonly string _Itenant;
 
-
-        public BusSubscriber(IApplicationBuilder app)
+        public BusSubscriber(IApplicationBuilder app, string tenant)
         {
+
+
             _logger = app.ApplicationServices.GetService<ILogger<BusSubscriber>>();
-            _serviceProvider = app.ApplicationServices.GetService<IServiceProvider>();
+            _serviceProvider = app.ApplicationServices.GetService<IServiceProvider>().CreateScope().ServiceProvider;
+
+            ITenant Itenant = _serviceProvider.GetService<ITenant>();
+            Itenant.TenantId = tenant;
+            _Itenant = tenant;
+
             _listBusClient = _serviceProvider.GetService<List<IBusClient>>();
             _tracer = _serviceProvider.GetService<ITracer>();
             var options = _serviceProvider.GetService<RabbitMqOptions>();
-            _defaultNamespace = options.Namespace;
             _retries = options.Retries >= 0 ? options.Retries : 3;
             _retryInterval = options.RetryInterval > 0 ? options.RetryInterval : 2;
         }
@@ -47,19 +52,23 @@ namespace DShop.Common.RabbitMq
             where TCommand : ICommand
         {
 
-
-            foreach (var item in _listBusClient)
+            IBusClient client = _listBusClient.Where(x =>
             {
-                item.SubscribeAsync<TCommand, CorrelationContext>(async (command, correlationContext) =>
+                if (GetVirtualHostInRawRabbitConfiguration(x) == _Itenant)
                 {
-                    var commandHandler = _serviceProvider.GetService<ICommandHandler<TCommand>>();
+                    return true;
+                }
 
-                    return await TryHandleAsync(command, correlationContext,
-                        () => commandHandler.HandleAsync(command, correlationContext), onError);
-                },
-                ctx => ctx.UseSubscribeConfiguration(cfg =>
-                    cfg.FromDeclaredQueue(q => q.WithName(GetQueueName<TCommand>(@namespace, queueName)))));
-            }
+                return false;
+            }).SingleOrDefault();
+
+            client.SubscribeAsync<TCommand, CorrelationContext>(async (command, correlationContext) =>
+            {
+                var commandHandler = _serviceProvider.GetService<ICommandHandler<TCommand>>();
+
+                return await TryHandleAsync(command, correlationContext,
+                    () => commandHandler.HandleAsync(command, correlationContext), onError);
+            });
 
             return this;
         }
@@ -68,19 +77,31 @@ namespace DShop.Common.RabbitMq
             Func<TEvent, DShopException, IRejectedEvent> onError = null)
             where TEvent : IEvent
         {
-
-            foreach (var item in _listBusClient)
+            IBusClient client = _listBusClient.Where(x =>
             {
-                item.SubscribeAsync<TEvent, CorrelationContext>(async (@event, correlationContext) =>
+                if (GetVirtualHostInRawRabbitConfiguration(x) == _Itenant)
                 {
-                    var eventHandler = _serviceProvider.GetService<IEventHandler<TEvent>>();
+                    return true;
+                }
 
-                    return await TryHandleAsync(@event, correlationContext,
-                        () => eventHandler.HandleAsync(@event, correlationContext), onError);
-                });
-            }
+                return false;
+            }).SingleOrDefault();
+
+            client.SubscribeAsync<TEvent, CorrelationContext>(async (@event, correlationContext) =>
+            {
+                var eventHandler = _serviceProvider.GetService<IEventHandler<TEvent>>();
+
+                return await TryHandleAsync(@event, correlationContext,
+                    () => eventHandler.HandleAsync(@event, correlationContext), onError);
+            });
 
             return this;
+        }
+
+        private string GetVirtualHostInRawRabbitConfiguration(object busClient)
+        {
+            RawRabbit.Pipe.PipeContextFactory pipeContextFactory = typeof(RawRabbit.BusClient).GetField("_contextFactory", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(busClient) as RawRabbit.Pipe.PipeContextFactory;
+            return (typeof(RawRabbit.Pipe.PipeContextFactory).GetField("_config", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(pipeContextFactory) as RawRabbit.Configuration.RawRabbitConfiguration).VirtualHost;
         }
 
         // Internal retry for services that subscribe to the multiple events of the same types.
@@ -205,21 +226,6 @@ namespace DShop.Common.RabbitMq
 
                 return Retry.In(TimeSpan.FromSeconds(_retryInterval));
             }
-        }
-
-
-
-        private string GetQueueName<T>(string @namespace = null, string name = null)
-        {
-            @namespace = string.IsNullOrWhiteSpace(@namespace)
-                ? (string.IsNullOrWhiteSpace(_defaultNamespace) ? string.Empty : _defaultNamespace)
-                : @namespace;
-
-            var separatedNamespace = string.IsNullOrWhiteSpace(@namespace) ? string.Empty : $"{@namespace}.";
-
-            return (string.IsNullOrWhiteSpace(name)
-                ? $"{Assembly.GetEntryAssembly().GetName().Name}/{separatedNamespace}{typeof(T).Name.Underscore()}"
-                : $"{name}/{separatedNamespace}{typeof(T).Name.Underscore()}").ToLowerInvariant();
         }
     }
 }

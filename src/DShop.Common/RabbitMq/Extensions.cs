@@ -1,12 +1,10 @@
-using System;
-using System.Collections.Generic;
-using System.Reflection;
-using System.Threading;
-using System.Threading.Tasks;
 using Autofac;
+using DShop.Common;
 using DShop.Common.Handlers;
 using DShop.Common.Jaeger;
 using DShop.Common.Messages;
+using DShop.Common.RabbitMq;
+using DShop.CrossCutting.MultiTenant;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using OpenTracing;
@@ -17,17 +15,25 @@ using RawRabbit.Enrichers.MessageContext;
 using RawRabbit.Instantiation;
 using RawRabbit.Pipe;
 using RawRabbit.Pipe.Middleware;
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 
-namespace DShop.Common.RabbitMq
+namespace DsLine.Core.RabbitMQ
 {
+
     public static class Extensions
     {
-        public static IBusSubscriber UseRabbitMq(this IApplicationBuilder app)
-            => new BusSubscriber(app);
+        public static IBusSubscriber UseRabbitMq(this IApplicationBuilder app, string tenant)
+        {
+            return new BusSubscriber(app, tenant);
+        }
+
 
         public static void AddRabbitMq(this ContainerBuilder builder)
         {
-
             builder.Register(context =>
             {
                 var configuration = context.Resolve<IConfiguration>();
@@ -60,10 +66,11 @@ namespace DShop.Common.RabbitMq
                 List<IInstanceFactory> instanceFactories = new List<IInstanceFactory>();
 
                 var listoptions = context.Resolve<List<RabbitMqOptions>>();
-
                 var tracer = context.Resolve<ITracer>();
+
                 if (listoptions != null)
                 {
+
                     foreach (var item in listoptions)
                     {
                         IInstanceFactory instanceFactory = RawRabbit.Instantiation.RawRabbitFactory.CreateInstanceFactory(new RawRabbitOptions
@@ -74,6 +81,20 @@ namespace DShop.Common.RabbitMq
                                 ioc.AddSingleton(item as RawRabbitConfiguration);
                                 ioc.AddSingleton<INamingConventions>(new CustomNamingConventions(item.Namespace));
                                 ioc.AddSingleton(tracer);
+
+
+                                ioc.AddSingleton<ITenant, Tenant>(provider =>
+                                {
+                                    Tenant tenant1 = new Tenant();
+                                    tenant1.TenantId = item.VirtualHost;
+                                    return tenant1;
+                                });
+
+                                var tenant = context.Resolve<ITenant>();
+                                tenant.TenantId = item.VirtualHost;
+                                //var dbContext = context.Resolve<IBaseDbContext>();
+                                //dbContext.RabbitMqcnnSQL = item.VirtualHost;
+                                //ioc.AddSingleton(dbContext);
                             },
                             Plugins = p => p
                                 .UseAttributeRouting()
@@ -88,10 +109,10 @@ namespace DShop.Common.RabbitMq
                     }
                 }
 
-
                 return instanceFactories;
             }).SingleInstance();
-            builder.Register(context => {
+            builder.Register(context =>
+            {
                 List<RawRabbit.IBusClient> busClients = new List<RawRabbit.IBusClient>();
                 context.Resolve<List<IInstanceFactory>>().ForEach(x => busClients.Add(x.Create()));
                 return busClients;
@@ -156,7 +177,6 @@ namespace DShop.Common.RabbitMq
         private static IClientBuilder UpdateRetryInfo(this IClientBuilder clientBuilder)
         {
             clientBuilder.Register(c => c.Use<RetryStagedMiddleware>());
-
             return clientBuilder;
         }
     }
